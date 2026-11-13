@@ -1,0 +1,25 @@
+{
+  "name": "sct-check",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Checks a certificate's Certificate Transparency: verifies every embedded SCT against Chrome's log list and proves the certificate is in each log, for static-ct-api (tiled) and RFC 6962 logs",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "sct-check": "src/main.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc",
+    "test": "node --test test/*.test.ts",
+    "crosscheck": "node scripts/crosscheck.ts"
+  },
+  "devDependencies": {
+    "@peculiar/x509": "^3.1.0",
+    "@types/node": "^24.19.2",
+    "reflect-metadata": "^0.2.2",
+    "typescript": "^7.0.2"
+  }
+}
