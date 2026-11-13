@@ -8,6 +8,7 @@ import { connect } from "node:tls";
 
 import { type Log, type TreeHead, LogFailure, inclusionProof, treeHead, verifySignature } from "./logs.ts";
 import { verifyInclusion } from "./merkle.ts";
+import { type PolicyResult, chromePolicy } from "./policy.ts";
 import { type Sct, embedded, issuerKeyHash, leafHash, signedData } from "./sct.ts";
 
 const TIMEOUT_MS = 10_000;
@@ -23,6 +24,8 @@ export interface SctResult {
   api?: "static-ct-api" | "rfc6962";
   timestamp: Date;
   leafIndex?: number;
+  /** Whether the log's signature on the SCT verified; only these count for Chrome's policy. */
+  signed: boolean;
   status: Status;
   detail: string;
 }
@@ -34,6 +37,7 @@ export interface Result {
   issuer?: string;
   notAfter?: Date;
   scts?: SctResult[];
+  policy?: PolicyResult;
 }
 
 export function parseTarget(target: string): { host: string; port: number } {
@@ -95,12 +99,15 @@ export class Checker {
       const x509 = new X509Certificate(leaf);
       const { scts, tbs } = embedded(leaf);
       const issuerKey = issuerKeyHash(issuer);
+      const results = await Promise.all(scts.map((sct) => this.checkSct(sct, issuerKey, tbs)));
+      const signed = results.flatMap((result, i) => (result.signed ? [{ log: this.logs.get(result.logId)!, timestamp: scts[i].timestamp }] : []));
       return {
         target,
         subject: x509.subject.split("\n").find((line) => line.startsWith("CN="))?.slice(3) ?? x509.subjectAltName ?? "",
         issuer: x509.issuer.split("\n").filter((line) => /^(O|CN)=/.test(line)).map((line) => line.slice(line.indexOf("=") + 1)).join(" "),
         notAfter: x509.validToDate,
-        scts: await Promise.all(scts.map((sct) => this.checkSct(sct, issuerKey, tbs))),
+        scts: results,
+        policy: chromePolicy(x509.validToDate.getTime() - x509.validFromDate.getTime(), signed),
       };
     } catch (error) {
       return { target, error: (error as Error).message };
@@ -109,13 +116,14 @@ export class Checker {
 
   private async checkSct(sct: Sct, issuerKey: Buffer, tbs: Buffer): Promise<SctResult> {
     const logId = sct.logId.toString("base64");
-    const base = { logId, timestamp: new Date(sct.timestamp), leafIndex: sct.leafIndex };
+    const base = { logId, timestamp: new Date(sct.timestamp), leafIndex: sct.leafIndex, signed: false };
     const log = this.logs.get(logId);
     if (!log) return { ...base, status: "fail", detail: "the log isn't in the log list" };
-    const about = { ...base, log: log.description, operator: log.operator, state: log.state, api: log.monitoringUrl ? ("static-ct-api" as const) : ("rfc6962" as const) };
+    const unsigned = { ...base, log: log.description, operator: log.operator, state: log.state, api: log.monitoringUrl ? ("static-ct-api" as const) : ("rfc6962" as const) };
     if (!verifySignature(log.key, signedData(sct, issuerKey, tbs), sct.signature)) {
-      return { ...about, status: "fail", detail: "the log's signature on the SCT doesn't verify" };
+      return { ...unsigned, status: "fail", detail: "the log's signature on the SCT doesn't verify" };
     }
+    const about = { ...unsigned, signed: true };
     try {
       const head = await this.head(log);
       const leaf = leafHash(sct, issuerKey, tbs);
@@ -143,10 +151,10 @@ export class Checker {
   }
 }
 
-/** 0 when every SCT checks out, 1 when one doesn't or there are none, 2 when something couldn't be checked. */
+/** 0 when every SCT checks out and Chrome's policy is met, 1 when not, 2 when something couldn't be checked. */
 export function exitCode(result: Result): number {
   if (result.error || result.scts?.some((sct) => sct.status === "error")) return 2;
-  if (!result.scts?.length || result.scts.some((sct) => sct.status === "fail")) return 1;
+  if (!result.policy?.met || result.scts?.some((sct) => sct.status === "fail")) return 1;
   return 0;
 }
 
@@ -162,5 +170,6 @@ export function describe(result: Result): string {
     const log = sct.log ? `${sct.log} (${sct.api}${sct.state === "usable" ? "" : `, ${sct.state}`})` : `log ${sct.logId}`;
     lines.push(`  ${label} ${log}, SCT of ${when(sct.timestamp)}: ${sct.detail}`);
   }
+  if (result.policy) lines.push(`  ${result.policy.met ? "ok   " : "FAIL "} Chrome's CT policy: ${result.policy.detail}`);
   return lines.join("\n");
 }

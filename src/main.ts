@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // sct-check: checks the Certificate Transparency of each host's certificate, or of a certificate
 // chain file. Every embedded SCT must carry a valid signature from a log in Chrome's log list,
-// and that log must prove the certificate is in its signed tree. Exits 1 if any SCT fails and 2
-// if something couldn't be checked, so it can run from cron or a monitoring check.
+// that log must prove the certificate is in its signed tree, and the SCTs must meet Chrome's CT
+// policy. Exits 1 if any of that fails and 2 if something couldn't be checked, so it can run
+// from cron or a monitoring check.
 
 import { parseArgs } from "node:util";
 
