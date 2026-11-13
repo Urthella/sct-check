@@ -2,6 +2,7 @@
 // its log's real key, and the hashes rebuilt here must match what the logs actually store.
 
 import assert from "node:assert/strict";
+import { X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -9,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { readChain } from "../src/check.ts";
 import { parseLogList, treeHeadData, verifyCheckpoint, verifySignature } from "../src/logs.ts";
 import { verifyInclusion } from "../src/merkle.ts";
+import { chromePolicy } from "../src/policy.ts";
 import { embedded, issuerKeyHash, leafHash, parseList, signedData } from "../src/sct.ts";
 
 const fixture = (name: string) => new URL(`fixtures/${name}`, import.meta.url);
@@ -33,6 +35,16 @@ test("every SCT in real certificates verifies under its log's key", async () => 
     const seen = scts.map((sct) => logOf(sct.logId).description + (sct.leafIndex === undefined ? "" : ` @${sct.leafIndex}`));
     assert.deepEqual(seen.sort(), [...expected].sort(), host);
     for (const sct of scts) assert.ok(verifySignature(logOf(sct.logId).key, signedData(sct, issuerKey, tbs), sct.signature), `${host}: ${logOf(sct.logId).description}`);
+  }
+});
+
+test("the real certificates meet Chrome's CT policy under the saved log list", async () => {
+  for (const host of Object.keys(EXPECTED)) {
+    const { leaf, scts } = await load(host);
+    const x509 = new X509Certificate(leaf);
+    const policy = chromePolicy(x509.validToDate.getTime() - x509.validFromDate.getTime(), scts.map((sct) => ({ log: logOf(sct.logId), timestamp: sct.timestamp })));
+    assert.ok(policy.met, `${host}: ${policy.detail}`);
+    assert.deepEqual([policy.required, policy.logs, policy.operators], [2, 2, 2], host);
   }
 });
 

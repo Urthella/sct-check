@@ -155,14 +155,17 @@ const server: Server = createHttpServer((request, response) => {
     const entry = (log: FakeLog, description: string, mmd: number, more: object) => ({ description, log_id: log.id.toString("base64"), key: log.spki.toString("base64"), mmd, state: { usable: { timestamp: "2026-01-01T00:00:00Z" } }, ...more });
     return send(JSON.stringify({
       version: "test",
-      operators: [{
-        name: "Test",
-        logs: [entry(rfcLog, "Test RFC 6962 log", 86_400, { url: `http://${origin("rfc/")}` })],
-        tiled_logs: [
-          entry(staticLog, "Test static log", 60, { monitoring_url: `http://${origin("static")}` }),
-          entry(badCheckpointLog, "Test badly signed log", 60, { monitoring_url: `http://${origin("bad/")}` }),
-        ],
-      }],
+      operators: [
+        {
+          name: "Test A",
+          logs: [],
+          tiled_logs: [
+            entry(staticLog, "Test static log", 60, { monitoring_url: `http://${origin("static")}` }),
+            entry(badCheckpointLog, "Test badly signed log", 60, { monitoring_url: `http://${origin("bad/")}` }),
+          ],
+        },
+        { name: "Test B", logs: [entry(rfcLog, "Test RFC 6962 log", 86_400, { url: `http://${origin("rfc/")}` })] },
+      ],
     }), "application/json");
   }
   if (url.pathname === "/static/checkpoint") return send(checkpoint(staticLog, staticLog, "static", staticLeaves), "text/plain");
@@ -192,7 +195,12 @@ const badSignature = await issue("11", [{ log: staticLog, index: 301, signWith: 
 staticLeaves[301] = badSignature.leaves[0];
 const unknown = await issue("12", [{ log: unknownLog }]);
 const missingLong = await issue("13", [{ log: staticLog, index: SIZE + 5, timestamp: Date.now() - 86_400_000 }, { log: rfcLog, timestamp: Date.now() - 2 * 86_400_000 }]);
-const missingNew = await issue("14", [{ log: staticLog, index: SIZE + 6, timestamp: Date.now() }]);
+const missingNew = await issue("14", [{ log: staticLog, index: SIZE + 6, timestamp: Date.now() }, { log: rfcLog }]);
+rfcLeaves[8] = missingNew.leaves[1];
+const oneLog = await issue("19", [{ log: staticLog, index: 302 }, { log: staticLog, index: 303 }]);
+[staticLeaves[302], staticLeaves[303]] = oneLog.leaves;
+const forged = await issue("20", [{ log: staticLog, index: 304 }, { log: rfcLog, signWith: staticLog.key }]);
+staticLeaves[304] = forged.leaves[0];
 const wrongEntry = await issue("15", [{ log: staticLog, index: 999 }]); // the tree holds something else there
 const noIndex = await issue("16", [{ log: staticLog }]);
 const badCheckpoint = await issue("17", [{ log: badCheckpointLog, index: 5 }]);
@@ -224,6 +232,7 @@ test("SCTs from both kinds of log that are signed and included pass, exit 0", as
   assert.equal(code, 0, out);
   assert.match(out, /ok {4}Test static log \(static-ct-api\), SCT of .+: entry 300 is in the log's tree of 1000 entries/);
   assert.match(out, /ok {4}Test RFC 6962 log \(rfc6962\), SCT of .+: entry 7 is in the log's tree of 40 entries/);
+  assert.match(out, /ok {4}Chrome's CT policy: SCTs from 2 logs and 2 operators, and a certificate of 91 days needs 2 logs and 2 operators/);
   assert.ok(asked.some((path) => path.startsWith("/static/tile/0/003.p/232")), "the partial level 0 tile");
 });
 
@@ -255,6 +264,19 @@ test("each way an SCT can fail is reported, exit 1", async () => {
   const text = await run("--file", file("none.pem", noScts.chain));
   assert.equal(text.code, 1);
   assert.match(text.out, /FAIL {2}no embedded SCTs/);
+});
+
+test("good SCTs that don't meet Chrome's policy exit 1, and forged SCTs don't count toward it", async () => {
+  const { code, out } = await run("--json", "--file", file("onelog.pem", oneLog.chain), "--file", file("forged.pem", forged.chain));
+  assert.equal(code, 1, out);
+  const [one, fake] = JSON.parse(out);
+  assert.deepEqual(one.scts.map((sct: { status: string }) => sct.status), ["ok", "ok"]);
+  assert.deepEqual({ ...one.policy, detail: undefined }, { met: false, required: 2, logs: 1, operators: 1, detail: undefined });
+  assert.equal(one.policy.detail, "SCTs from 1 counted logs, and a certificate of 91 days needs 2; SCTs from 1 counted operators, and it needs 2");
+  assert.deepEqual(fake.scts.map((sct: { status: string; signed: boolean }) => [sct.status, sct.signed]), [["ok", true], ["fail", false]]);
+  assert.equal(fake.policy.logs, 1, "the forged SCT isn't counted");
+  const text = await run("--file", file("onelog2.pem", oneLog.chain));
+  assert.match(text.out, /FAIL {2}Chrome's CT policy: SCTs from 1 counted logs/);
 });
 
 test("an entry the log hasn't merged yet, within its merge delay, is pending, exit 0", async () => {

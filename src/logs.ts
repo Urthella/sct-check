@@ -14,6 +14,10 @@ export interface Log {
   logId: string; // base64, as in the list
   key: Buffer; // SubjectPublicKeyInfo, DER
   state: string; // usable, readonly, retired, qualified, pending or rejected
+  /** When the log entered its state, in milliseconds since the epoch. */
+  stateSince?: number;
+  /** Operators that ran the log before, with when each stopped. */
+  previousOperators?: { name: string; endTime: number }[];
   mmdSeconds: number;
   /** An RFC 6962 log's base URL. */
   url?: string;
@@ -67,7 +71,8 @@ interface ListedLog {
   log_id: string;
   key: string;
   mmd: number;
-  state?: Record<string, unknown>;
+  state?: Record<string, { timestamp?: string }>;
+  previous_operators?: { name: string; end_time: string }[];
   url?: string;
   monitoring_url?: string;
 }
@@ -80,12 +85,15 @@ export function parseLogList(json: string): Map<string, Log> {
   const logs = new Map<string, Log>();
   for (const operator of list.operators) {
     for (const log of [...(operator.logs ?? []), ...(operator.tiled_logs ?? [])]) {
+      const [state, since] = Object.entries(log.state ?? {})[0] ?? ["unknown", {}];
       logs.set(log.log_id, {
         description: log.description,
         operator: operator.name,
         logId: log.log_id,
         key: Buffer.from(log.key, "base64"),
-        state: Object.keys(log.state ?? {})[0] ?? "unknown",
+        state,
+        stateSince: since.timestamp ? Date.parse(since.timestamp) : undefined,
+        previousOperators: log.previous_operators?.map((previous) => ({ name: previous.name, endTime: Date.parse(previous.end_time) })),
         mmdSeconds: log.mmd,
         url: log.url && slash(log.url),
         monitoringUrl: log.monitoring_url && slash(log.monitoring_url),
